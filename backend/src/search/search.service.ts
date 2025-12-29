@@ -64,12 +64,11 @@ export class SearchService {
         };
       }
 
-      // Fetch details for each article (handle failures gracefully)
+      // Fetch details for each article with throttling to avoid rate limits
       // CRITICAL: We maintain the EXACT order returned by PubMed to match PubMed's results
       // PubMed returns PMIDs in a specific order (by relevance or date), and we preserve that order
-      const articleResults = await Promise.allSettled(
-        pagePmids.map(pmid => this.pubmedService.getArticleDetails(pmid))
-      );
+      // Process in batches of 3 with 200ms delay between batches to respect rate limits
+      const articleResults = await this.fetchArticlesWithThrottling(pagePmids);
 
       // Preserve exact order from PubMed - only include successfully fetched articles
       // This ensures results match PubMed's display order exactly
@@ -138,5 +137,36 @@ export class SearchService {
       console.error('Error in search service:', error);
       throw error;
     }
+  }
+
+  /**
+   * Fetch articles with throttling to avoid PubMed rate limits
+   * Processes articles in batches with delays between batches
+   */
+  private async fetchArticlesWithThrottling(
+    pmids: string[],
+    batchSize: number = 3,
+    delayMs: number = 200,
+  ): Promise<PromiseSettledResult<ArticleSummary>[]> {
+    const results: PromiseSettledResult<ArticleSummary>[] = [];
+
+    // Process in batches
+    for (let i = 0; i < pmids.length; i += batchSize) {
+      const batch = pmids.slice(i, i + batchSize);
+
+      // Fetch batch concurrently
+      const batchResults = await Promise.allSettled(
+        batch.map(pmid => this.pubmedService.getArticleDetails(pmid))
+      );
+
+      results.push(...batchResults);
+
+      // Add delay between batches (except for the last batch)
+      if (i + batchSize < pmids.length) {
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+    }
+
+    return results;
   }
 }

@@ -139,17 +139,18 @@ export class PubmedService {
     }
   }
 
-  async getArticleDetails(pmid: string): Promise<ArticleSummary> {
-    try {
-      // Fetch article details
-      const fetchResponse = await axios.get(`${this.baseUrl}/efetch.fcgi`, {
-        params: {
-          db: 'pubmed',
-          id: pmid,
-          retmode: 'xml',
-        },
-        timeout: 10000, // 10 second timeout
-      });
+  async getArticleDetails(pmid: string, retries: number = 2): Promise<ArticleSummary> {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        // Fetch article details
+        const fetchResponse = await axios.get(`${this.baseUrl}/efetch.fcgi`, {
+          params: {
+            db: 'pubmed',
+            id: pmid,
+            retmode: 'xml',
+          },
+          timeout: 10000, // 10 second timeout
+        });
 
       const xmlData = fetchResponse.data;
 
@@ -163,23 +164,57 @@ export class PubmedService {
         throw new Error(`Article ${pmid} not found or invalid`);
       }
 
-      return await this.parseArticleXml(xmlData, pmid);
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        if (error.code === 'ECONNABORTED') {
-          throw new Error(`Request timeout for article ${pmid}`);
+        return await this.parseArticleXml(xmlData, pmid);
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          // Handle rate limiting (429) with exponential backoff retry
+          if (error.response?.status === 429) {
+            if (attempt < retries) {
+              const backoffDelay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
+              console.warn(`Rate limited for article ${pmid}, retrying in ${backoffDelay}ms (attempt ${attempt + 1}/${retries + 1})`);
+              await new Promise(resolve => setTimeout(resolve, backoffDelay));
+              continue; // Retry
+            }
+            throw new Error(`HTTP error 429 (rate limited) for article ${pmid} after ${retries + 1} attempts`);
+          }
+
+          if (error.code === 'ECONNABORTED') {
+            if (attempt < retries) {
+              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+              continue; // Retry timeout errors
+            }
+            throw new Error(`Request timeout for article ${pmid}`);
+          }
+
+          if (error.response) {
+            // Don't retry on 4xx errors (except 429) or 5xx errors
+            if (error.response.status >= 400 && error.response.status < 500 && error.response.status !== 429) {
+              throw new Error(`HTTP error ${error.response.status} for article ${pmid}`);
+            }
+            if (attempt < retries) {
+              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+              continue; // Retry 5xx errors
+            }
+            throw new Error(`HTTP error ${error.response.status} for article ${pmid}`);
+          }
+
+          if (error.request) {
+            if (attempt < retries) {
+              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+              continue; // Retry network errors
+            }
+            throw new Error(`Network error fetching article ${pmid}`);
+          }
         }
-        if (error.response) {
-          throw new Error(`HTTP error ${error.response.status} for article ${pmid}`);
-        }
-        if (error.request) {
-          throw new Error(`Network error fetching article ${pmid}`);
-        }
+
+        // Non-HTTP errors: don't retry
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        throw new Error(`Failed to fetch article ${pmid}: ${errorMessage}`);
       }
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`Error fetching article ${pmid}:`, errorMessage);
-      throw new Error(`Failed to fetch article ${pmid}: ${errorMessage}`);
     }
+
+    // Should never reach here, but TypeScript needs it
+    throw new Error(`Failed to fetch article ${pmid} after ${retries + 1} attempts`);
   }
 
   private async parseArticleXml(xmlData: string, pmid: string): Promise<ArticleSummary> {
