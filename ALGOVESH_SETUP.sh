@@ -32,8 +32,16 @@ EOF
     echo "⚠️  Please update backend/.env with your OpenAI API key!"
 fi
 
-npm install --production
+# Install all dependencies (including dev) for building
+npm install
+
+# Build the backend
+echo "Building backend..."
 npm run build
+
+# Remove dev dependencies after build to save space
+echo "Removing dev dependencies..."
+npm prune --production
 
 # Start with PM2
 if pm2 list | grep -q "pubmed-helper-backend"; then
